@@ -75,6 +75,12 @@ void test_round_trip_all_types() {
     state.state.scene = 7;
     state.state.room = 63;
     CHECK(round_trip(state).state.same_as(state.state));
+
+    Frame welcome;
+    welcome.type = Type::Welcome;
+    welcome.from = 1;
+    welcome.assigned = 3;
+    CHECK(round_trip(welcome).assigned == 3);
 }
 
 void test_round_trip_notices() {
@@ -147,6 +153,12 @@ void test_rejects_bad_payloads() {
     CHECK(!net::wire::decode({1, 5, 1, 3, 0, 0, 1, 1}).has_value()); // count 1 but no candidate byte
     CHECK(!net::wire::decode({1, 5, 1, 4, 0, 0, 1, 1, 0}).has_value()); // candidate 0 is not a player
     CHECK(!net::wire::decode({1, 5, 1, 3, 0, 0, 0, 0}).has_value()); // player 0 is not a player
+
+    // Welcome: one byte, a joining player id (2..4), never the host's own id 1.
+    CHECK(net::wire::decode({1, 7, 1, 1, 0, 2}).has_value());
+    CHECK(!net::wire::decode({1, 7, 1, 1, 0, 1}).has_value());
+    CHECK(!net::wire::decode({1, 7, 1, 1, 0, 5}).has_value());
+    CHECK(!net::wire::decode({1, 7, 1, 0, 0}).has_value());
 
     // PlayerState: exactly 18 bytes.
     Bytes state(5 + 17, 0);

@@ -28,6 +28,7 @@ enum class Type : uint8_t {
     HostAck = 4,     // the drawn player confirms they hold the state (empty payload)
     Notice = 5,      // a session notice: kind, player, count, candidates
     PlayerState = 6, // a player's position and animation (18 bytes)
+    Welcome = 7,     // the host gives a joining client its player id: 1 byte, 2..4
 };
 
 // State of a remote Link, sent a few times per second. Units are the game's own.
@@ -50,6 +51,7 @@ struct Frame {
     bool wants_host = false;  // Type::Vote
     net::Notice notice;       // Type::Notice
     PlayerState state;        // Type::PlayerState
+    PlayerId assigned = 0;    // Type::Welcome
 };
 
 std::vector<uint8_t> encode(const Frame& frame);

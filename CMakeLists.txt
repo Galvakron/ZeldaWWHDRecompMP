@@ -429,6 +429,21 @@ add_executable(net_wire_test runtime/tools/net_wire_test.cpp runtime/src/net/ses
 target_include_directories(net_wire_test PRIVATE runtime/src)
 target_compile_options(net_wire_test PRIVATE -UNDEBUG)
 add_test(NAME net_wire COMMAND net_wire_test)
+# Multiplayer transport over ENet, pinned to v1.3.18. Off by default: it fetches ENet at configure time.
+option(WWHD_MULTIPLAYER "multiplayer transport over ENet v1.3.18 (fetched at configure time)" OFF)
+if(WWHD_MULTIPLAYER)
+    include(FetchContent)
+    FetchContent_Declare(enet
+        GIT_REPOSITORY https://github.com/lsalzman/enet.git
+        GIT_TAG 2662c0de09e36f2a2030ccc2c528a3e4c9e8138a)
+    FetchContent_MakeAvailable(enet)
+    add_executable(net_enet_test runtime/tools/net_enet_test.cpp runtime/src/net/enet_link.cpp runtime/src/net/session.cpp runtime/src/net/wire.cpp runtime/src/net/loopback.cpp)
+    target_include_directories(net_enet_test PRIVATE runtime/src)
+    target_compile_options(net_enet_test PRIVATE -UNDEBUG)
+    target_include_directories(net_enet_test PRIVATE ${enet_SOURCE_DIR}/include)
+    target_link_libraries(net_enet_test PRIVATE enet)
+    add_test(NAME net_enet COMMAND net_enet_test)
+endif()
 # World editor MCP interface (runtime/src/editor/mcp.h): HTTP parsing, JSON-RPC, tools, token, Host / Origin,
 # size limit, confirm and path rules, and the loopback listener
 add_executable(editor_mcp_test runtime/tools/editor_mcp_test.cpp runtime/src/editor/mcp.cpp runtime/src/editor/mcp_server.cpp

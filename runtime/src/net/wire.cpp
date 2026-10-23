@@ -72,6 +72,9 @@ std::vector<uint8_t> payload_of(const Frame& f) {
     case Type::PlayerState:
         put_state(out, f.state);
         break;
+    case Type::Welcome:
+        put_u8(out, f.assigned);
+        break;
     }
     return out;
 }
@@ -107,6 +110,10 @@ bool parse_payload(Type type, const uint8_t* p, size_t n, Frame& f) {
         if (n != kPlayerStateSize) return false;
         f.state = get_state(p);
         return true;
+    case Type::Welcome:
+        if (n != 1 || !valid_player(p[0]) || p[0] == kFirstPlayer) return false;
+        f.assigned = p[0];
+        return true;
     }
     return false;
 }
@@ -129,7 +136,7 @@ std::optional<Frame> decode(const std::vector<uint8_t>& bytes) {
     if (bytes.size() < kHeaderSize) return std::nullopt;
     const uint8_t* d = bytes.data();
     if (d[0] != kVersion) return std::nullopt;
-    if (d[1] < 1 || d[1] > static_cast<uint8_t>(Type::PlayerState)) return std::nullopt;
+    if (d[1] < 1 || d[1] > static_cast<uint8_t>(Type::Welcome)) return std::nullopt;
     if (!valid_player(d[2])) return std::nullopt;
     const size_t length = get_u16(d + 3);
     if (bytes.size() != kHeaderSize + length) return std::nullopt;
