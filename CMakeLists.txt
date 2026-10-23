@@ -424,6 +424,11 @@ add_executable(net_session_test runtime/tools/net_session_test.cpp runtime/src/n
 target_include_directories(net_session_test PRIVATE runtime/src)
 target_compile_options(net_session_test PRIVATE -UNDEBUG)
 add_test(NAME net_session COMMAND net_session_test)
+# Multiplayer message format and the in-memory transport (runtime/src/net/wire.h, loopback.h). Pure logic.
+add_executable(net_wire_test runtime/tools/net_wire_test.cpp runtime/src/net/session.cpp runtime/src/net/wire.cpp runtime/src/net/loopback.cpp)
+target_include_directories(net_wire_test PRIVATE runtime/src)
+target_compile_options(net_wire_test PRIVATE -UNDEBUG)
+add_test(NAME net_wire COMMAND net_wire_test)
 # World editor MCP interface (runtime/src/editor/mcp.h): HTTP parsing, JSON-RPC, tools, token, Host / Origin,
 # size limit, confirm and path rules, and the loopback listener
 add_executable(editor_mcp_test runtime/tools/editor_mcp_test.cpp runtime/src/editor/mcp.cpp runtime/src/editor/mcp_server.cpp
