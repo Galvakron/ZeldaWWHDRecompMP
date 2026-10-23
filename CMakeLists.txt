@@ -419,6 +419,11 @@ add_executable(editor_water_test runtime/tools/editor_water_test.cpp runtime/src
 target_include_directories(editor_water_test PRIVATE runtime/src)
 target_compile_options(editor_water_test PRIVATE -UNDEBUG)
 add_test(NAME editor_water COMMAND editor_water_test)
+# Multiplayer host session (runtime/src/net/session.h): pause, takeover vote, draw and host restore. Pure logic.
+add_executable(net_session_test runtime/tools/net_session_test.cpp runtime/src/net/session.cpp)
+target_include_directories(net_session_test PRIVATE runtime/src)
+target_compile_options(net_session_test PRIVATE -UNDEBUG)
+add_test(NAME net_session COMMAND net_session_test)
 # World editor MCP interface (runtime/src/editor/mcp.h): HTTP parsing, JSON-RPC, tools, token, Host / Origin,
 # size limit, confirm and path rules, and the loopback listener
 add_executable(editor_mcp_test runtime/tools/editor_mcp_test.cpp runtime/src/editor/mcp.cpp runtime/src/editor/mcp_server.cpp
