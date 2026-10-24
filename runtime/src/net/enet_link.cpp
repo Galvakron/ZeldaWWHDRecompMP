@@ -1,7 +1,6 @@
 #include "net/enet_link.h"
 
 #include <cstdint>
-#include <cstring>
 #include <utility>
 
 #include <enet/enet.h>
@@ -21,7 +20,10 @@ PlayerId slot_of(const _ENetPeer* peer) {
     return static_cast<PlayerId>(reinterpret_cast<uintptr_t>(peer->data));
 }
 
-// Builds a packet from bytes. Caller passes it to enet_peer_send, which keeps it only on success.
+bool valid_player(PlayerId p) {
+    return p >= kFirstPlayer && p <= kMaxPlayers;
+}
+
 ENetPacket* make_packet(const std::vector<uint8_t>& bytes, bool reliable) {
     const enet_uint32 flags = reliable ? ENET_PACKET_FLAG_RELIABLE : 0;
     return enet_packet_create(bytes.data(), bytes.size(), flags);
@@ -40,38 +42,31 @@ EnetLink::~EnetLink() {
     if (enet_ready_ && --g_enet_users == 0) enet_deinitialize();
 }
 
-bool EnetLink::host(uint16_t port, int max_clients) {
-    if (!enet_ready_ || mode_ != Mode::None) return false;
-    if (max_clients < 1) max_clients = 1;
-    if (max_clients > kMaxPlayers - 1) max_clients = kMaxPlayers - 1;
+bool EnetLink::open(PlayerId self, uint16_t listen_port) {
+    if (!enet_ready_ || host_ || !valid_player(self)) return false;
 
     ENetAddress address{};
     address.host = ENET_HOST_ANY;
-    address.port = port;
-    host_ = enet_host_create(&address, static_cast<size_t>(max_clients), 1, 0, 0);
+    address.port = listen_port;
+    // Room for every other player at once.
+    host_ = enet_host_create(&address, kMaxPlayers, 1, 0, 0);
     if (!host_) return false;
-    mode_ = Mode::Host;
-    self_ = kFirstPlayer;
+    self_ = self;
     return true;
 }
 
-bool EnetLink::connect(const char* address, uint16_t port) {
-    if (!enet_ready_ || mode_ != Mode::None || !address) return false;
+bool EnetLink::connect_to(const PeerAddress& peer) {
+    if (!host_ || !valid_player(peer.player) || peer.player == self_) return false;
+    if (peers_[peer.player]) return false; // already connected or connecting
 
     ENetAddress target{};
-    if (enet_address_set_host(&target, address) != 0) return false;
-    target.port = port;
+    if (enet_address_set_host(&target, peer.ip.c_str()) != 0) return false;
+    target.port = peer.port;
 
-    host_ = enet_host_create(nullptr, 1, 1, 0, 0);
-    if (!host_) return false;
-    server_peer_ = enet_host_connect(host_, &target, 1, 0);
-    if (!server_peer_) {
-        enet_host_destroy(host_);
-        host_ = nullptr;
-        return false;
-    }
-    mode_ = Mode::Client;
-    self_ = 0;
+    ENetPeer* connection = enet_host_connect(host_, &target, 1, 0);
+    if (!connection) return false;
+    connection->data = slot_data(peer.player);
+    peers_[peer.player] = connection;
     return true;
 }
 
@@ -99,20 +94,20 @@ void EnetLink::service(uint32_t timeout_ms) {
 }
 
 void EnetLink::send(PlayerId to, const std::vector<uint8_t>& bytes, bool reliable) {
-    _ENetPeer* peer = peer_for(to);
-    if (!peer || !host_) return;
+    if (!host_ || !joined(to)) return;
     ENetPacket* packet = make_packet(bytes, reliable);
     if (!packet) return;
-    if (enet_peer_send(peer, 0, packet) != 0) {
-        enet_packet_destroy(packet); // not taken over on failure
+    if (enet_peer_send(peers_[to], 0, packet) != 0) {
+        enet_packet_destroy(packet); // ENet keeps the packet only on success
         return;
     }
     enet_host_flush(host_);
 }
 
 void EnetLink::broadcast(const std::vector<uint8_t>& bytes, bool reliable) {
-    if (mode_ != Mode::Host) return;
-    for (PlayerId p = kFirstPlayer + 1; p <= kMaxPlayers; ++p) send(p, bytes, reliable);
+    for (PlayerId p = kFirstPlayer; p <= kMaxPlayers; ++p) {
+        if (p != self_) send(p, bytes, reliable);
+    }
 }
 
 bool EnetLink::poll(Inbound& out) {
@@ -130,29 +125,14 @@ bool EnetLink::poll_event(LinkEvent& out) {
 }
 
 bool EnetLink::joined(PlayerId p) const {
-    if (mode_ == Mode::Host) {
-        if (p == kFirstPlayer) return true;
-        return p > kFirstPlayer && p <= kMaxPlayers && peers_[p] != nullptr;
-    }
-    if (mode_ == Mode::Client) {
-        if (p == kFirstPlayer) return server_peer_ != nullptr;
-        return self_ != 0 && p == self_ && server_peer_ != nullptr;
-    }
-    return false;
+    return valid_player(p) && p != self_ && bound_[p];
 }
 
 void EnetLink::shutdown() {
-    if (!host_) {
-        mode_ = Mode::None;
-        return;
-    }
-    // Say goodbye to every connected peer, give ENet a moment to send it, then tear down.
-    if (mode_ == Mode::Host) {
-        for (PlayerId p = kFirstPlayer + 1; p <= kMaxPlayers; ++p) {
-            if (peers_[p]) enet_peer_disconnect(peers_[p], 0);
-        }
-    } else if (server_peer_) {
-        enet_peer_disconnect(server_peer_, 0);
+    if (!host_) return;
+    // Say goodbye to everyone, give ENet a moment to send it, then tear down.
+    for (PlayerId p = kFirstPlayer; p <= kMaxPlayers; ++p) {
+        if (peers_[p]) enet_peer_disconnect(peers_[p], 0);
     }
     enet_host_flush(host_);
     ENetEvent event{};
@@ -162,88 +142,68 @@ void EnetLink::shutdown() {
     enet_host_destroy(host_);
     host_ = nullptr;
     peers_.fill(nullptr);
-    server_peer_ = nullptr;
-    mode_ = Mode::None;
+    bound_.fill(false);
     self_ = 0;
     inbox_.clear();
     events_.clear();
 }
 
 void EnetLink::on_connect(_ENetPeer* peer) {
-    if (mode_ != Mode::Host) return; // a client waits for Welcome from the host
-
-    PlayerId slot = 0;
-    for (PlayerId p = kFirstPlayer + 1; p <= kMaxPlayers; ++p) {
-        if (!peers_[p]) {
-            slot = p;
-            break;
-        }
-    }
-    if (slot == 0) {
-        peer->data = nullptr;
-        enet_peer_disconnect(peer, 0); // full: no slot left
-        return;
-    }
-
-    peers_[slot] = peer;
-    peer->data = slot_data(slot);
-
-    wire::Frame welcome;
-    welcome.type = wire::Type::Welcome;
-    welcome.from = kFirstPlayer;
-    welcome.assigned = slot;
-    ENetPacket* packet = make_packet(wire::encode(welcome), true);
-    if (packet && enet_peer_send(peer, 0, packet) != 0) enet_packet_destroy(packet);
-
-    events_.push_back({LinkEventKind::Connected, slot});
+    // Either side of a new connection introduces itself. The other side binds the connection to our id.
+    send_hello(peer);
 }
 
 void EnetLink::on_receive(_ENetPeer* peer, const uint8_t* data, size_t size) {
     std::vector<uint8_t> bytes(data, data + size);
+    auto frame = wire::decode(bytes);
 
-    if (mode_ == Mode::Client) {
-        auto frame = wire::decode(bytes);
-        if (frame && frame->type == wire::Type::Welcome) {
-            if (self_ == 0) {
-                self_ = frame->assigned;
-                events_.push_back({LinkEventKind::Connected, self_});
-            }
-            return; // handled here, not passed on
-        }
-        inbox_.push_back({kFirstPlayer, std::move(bytes)});
+    if (frame && frame->type == wire::Type::Hello) {
+        bind(peer, frame->from);
         return;
     }
 
-    if (mode_ == Mode::Host) {
-        const PlayerId from = slot_of(peer);
-        if (from == 0) return; // a peer without a slot (refused): ignore
-        inbox_.push_back({from, std::move(bytes)});
-    }
+    // Anything else is only accepted from a bound connection; its sender is the bound player.
+    const PlayerId from = slot_of(peer);
+    if (!valid_player(from) || !bound_[from] || peers_[from] != peer) return;
+    inbox_.push_back({from, std::move(bytes)});
 }
 
 void EnetLink::on_disconnect(_ENetPeer* peer) {
-    if (mode_ == Mode::Host) {
-        const PlayerId slot = slot_of(peer);
-        peer->data = nullptr;
-        if (slot > kFirstPlayer && slot <= kMaxPlayers && peers_[slot] == peer) {
-            peers_[slot] = nullptr;
-            events_.push_back({LinkEventKind::Disconnected, slot});
-        }
-        return;
-    }
-    if (mode_ == Mode::Client && peer == server_peer_) {
-        server_peer_ = nullptr;
-        events_.push_back({LinkEventKind::Disconnected, kFirstPlayer});
+    const PlayerId slot = slot_of(peer);
+    peer->data = nullptr;
+    if (!valid_player(slot) || peers_[slot] != peer) return;
+    peers_[slot] = nullptr;
+    if (bound_[slot]) {
+        bound_[slot] = false;
+        events_.push_back({LinkEventKind::Disconnected, slot});
     }
 }
 
-_ENetPeer* EnetLink::peer_for(PlayerId p) const {
-    if (mode_ == Mode::Host) {
-        if (p <= kFirstPlayer || p > kMaxPlayers) return nullptr;
-        return peers_[p];
+void EnetLink::bind(_ENetPeer* peer, PlayerId player) {
+    if (!valid_player(player) || player == self_) {
+        enet_peer_disconnect(peer, 0);
+        return;
     }
-    if (mode_ == Mode::Client && p == kFirstPlayer) return server_peer_;
-    return nullptr;
+    if (peers_[player] && peers_[player] != peer) {
+        // A second connection to the same player: keep the one already there.
+        enet_peer_disconnect(peer, 0);
+        return;
+    }
+    peer->data = slot_data(player);
+    peers_[player] = peer;
+    if (!bound_[player]) {
+        bound_[player] = true;
+        events_.push_back({LinkEventKind::Connected, player});
+    }
+}
+
+void EnetLink::send_hello(_ENetPeer* peer) {
+    wire::Frame hello;
+    hello.type = wire::Type::Hello;
+    hello.from = self_;
+    ENetPacket* packet = make_packet(wire::encode(hello), true);
+    if (packet && enet_peer_send(peer, 0, packet) != 0) enet_packet_destroy(packet);
+    enet_host_flush(host_);
 }
 
 } // namespace net

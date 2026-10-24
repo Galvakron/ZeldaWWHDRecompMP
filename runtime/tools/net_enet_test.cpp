@@ -1,5 +1,5 @@
-// Tests for the ENet transport (runtime/src/net/enet_link.h): a host and clients on localhost.
-// Needs the ENet library (WWHD_MULTIPLAYER). Plain asserts; returns non-zero when a check fails.
+// Tests for the ENet mesh (runtime/src/net/enet_link.h): three players on localhost, each listening
+// and connected to the others. Needs the ENet library (WWHD_MULTIPLAYER). Returns non-zero on failure.
 #include <unistd.h>
 
 #include <cstdio>
@@ -15,6 +15,7 @@ using net::EnetLink;
 using net::Inbound;
 using net::LinkEvent;
 using net::LinkEventKind;
+using net::PeerAddress;
 using net::PlayerId;
 using net::wire::Frame;
 using net::wire::Type;
@@ -29,22 +30,31 @@ int g_failures = 0;
         }                                                                             \
     } while (0)
 
-// Services every link a few times so packets and handshakes move on.
 void pump(std::initializer_list<EnetLink*> links, int rounds = 20) {
     for (int r = 0; r < rounds; ++r)
         for (EnetLink* l : links) l->service(5);
 }
 
-bool wait_for_self(EnetLink& client, std::initializer_list<EnetLink*> all, int rounds = 400) {
-    for (int r = 0; r < rounds && client.self() == 0; ++r) pump(all, 1);
-    return client.self() != 0;
+// Ports for this run: different per test and per process, so runs do not collide.
+uint16_t port_for(int test) {
+    return static_cast<uint16_t>(47100 + (getpid() % 300) * 8 + test);
 }
 
-bool next_event(EnetLink& l, LinkEvent& out) {
-    return l.poll_event(out);
+// Takes every pending event of a link, so several checks can look at the same batch.
+std::vector<LinkEvent> drain(EnetLink& l) {
+    std::vector<LinkEvent> out;
+    LinkEvent ev{};
+    while (l.poll_event(ev)) out.push_back(ev);
+    return out;
 }
 
-bool receive(EnetLink& l, Inbound& out, std::initializer_list<EnetLink*> all, int rounds = 100) {
+bool contains(const std::vector<LinkEvent>& events, LinkEventKind kind, PlayerId player) {
+    for (const auto& ev : events)
+        if (ev.kind == kind && ev.player == player) return true;
+    return false;
+}
+
+bool receive(EnetLink& l, Inbound& out, std::initializer_list<EnetLink*> all, int rounds = 200) {
     for (int r = 0; r < rounds; ++r) {
         if (l.poll(out)) return true;
         pump(all, 1);
@@ -52,140 +62,122 @@ bool receive(EnetLink& l, Inbound& out, std::initializer_list<EnetLink*> all, in
     return false;
 }
 
-Frame hello(PlayerId from) {
-    Frame f;
-    f.type = Type::Hello;
-    f.from = from;
-    return f;
+void test_three_player_mesh() {
+    std::fprintf(stderr, "three players form a full mesh\n");
+    const uint16_t p1 = port_for(1), p2 = port_for(2), p3 = port_for(3);
+    EnetLink a, b, c;
+    CHECK(a.open(1, p1));
+    CHECK(b.open(2, p2));
+    CHECK(c.open(3, p3));
+
+    // Joining order: 2 connects to 1, then 3 connects to 1 and 2 (the roster it got from the lobby).
+    CHECK(b.connect_to({1, "127.0.0.1", p1}));
+    pump({&a, &b, &c}, 60);
+    CHECK(c.connect_to({1, "127.0.0.1", p1}));
+    CHECK(c.connect_to({2, "127.0.0.1", p2}));
+    pump({&a, &b, &c}, 100);
+
+    CHECK(a.joined(2) && a.joined(3));
+    CHECK(b.joined(1) && b.joined(3));
+    CHECK(c.joined(1) && c.joined(2));
+    const auto a_events = drain(a);
+    CHECK(contains(a_events, LinkEventKind::Connected, 2));
+    CHECK(contains(a_events, LinkEventKind::Connected, 3));
+
+    a.shutdown();
+    b.shutdown();
+    c.shutdown();
 }
 
-void test_join_assigns_ids() {
-    std::fprintf(stderr, "clients join and receive ids 2 and 3\n");
-    const uint16_t port = static_cast<uint16_t>(47000 + (getpid() % 1000));
-    EnetLink host;
-    CHECK(host.host(port));
-    CHECK(host.self() == 1 && host.is_host());
+void test_messages_between_all() {
+    std::fprintf(stderr, "messages reach one player or all of them\n");
+    const uint16_t p1 = port_for(4), p2 = port_for(5), p3 = port_for(6);
+    EnetLink a, b, c;
+    CHECK(a.open(1, p1) && b.open(2, p2) && c.open(3, p3));
+    CHECK(b.connect_to({1, "127.0.0.1", p1}));
+    pump({&a, &b, &c}, 60);
+    CHECK(c.connect_to({1, "127.0.0.1", p1}));
+    CHECK(c.connect_to({2, "127.0.0.1", p2}));
+    pump({&a, &b, &c}, 100);
 
-    EnetLink c2, c3;
-    CHECK(c2.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c2, {&host, &c2}));
-    CHECK(c2.self() == 2);
-
-    LinkEvent ev{};
-    CHECK(next_event(host, ev) && ev.kind == LinkEventKind::Connected && ev.player == 2);
-    CHECK(next_event(c2, ev) && ev.kind == LinkEventKind::Connected && ev.player == 2);
-
-    CHECK(c3.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c3, {&host, &c2, &c3}));
-    CHECK(c3.self() == 3);
-    CHECK(next_event(host, ev) && ev.kind == LinkEventKind::Connected && ev.player == 3);
-
-    CHECK(host.joined(2) && host.joined(3) && !host.joined(4));
-    CHECK(c2.joined(1) && c2.joined(2));
-
-    c2.shutdown();
-    c3.shutdown();
-    host.shutdown();
-}
-
-void test_messages_both_ways() {
-    std::fprintf(stderr, "messages go client to host and host to clients\n");
-    const uint16_t port = static_cast<uint16_t>(47000 + (getpid() % 1000) + 1);
-    EnetLink host, c2, c3;
-    CHECK(host.host(port));
-    CHECK(c2.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c2, {&host, &c2}));
-    CHECK(c3.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c3, {&host, &c2, &c3}));
-
-    // Client 2 -> host, reliable: the host sees who sent it.
-    c2.send(1, net::wire::encode(hello(2)), true);
-    Inbound in;
-    CHECK(receive(host, in, {&host, &c2, &c3}));
-    CHECK(in.from == 2);
-    auto f = net::wire::decode(in.bytes);
-    CHECK(f.has_value() && f->type == Type::Hello && f->from == 2);
-
-    // Host -> everyone: each client gets the same bytes, and nothing is looped back to the host.
+    // Host sends to everyone else: both receive it, and the host itself does not.
     Frame state;
     state.type = Type::PlayerState;
     state.from = 1;
     state.state.x = -42;
-    state.state.anim = 7;
-    host.broadcast(net::wire::encode(state), true);
-    CHECK(receive(c2, in, {&host, &c2, &c3}));
-    auto got2 = net::wire::decode(in.bytes);
-    CHECK(got2.has_value() && got2->type == Type::PlayerState && got2->state.x == -42);
-    CHECK(receive(c3, in, {&host, &c2, &c3}));
-    auto got3 = net::wire::decode(in.bytes);
-    CHECK(got3.has_value() && got3->state.anim == 7);
-    CHECK(!host.poll(in));
+    a.broadcast(net::wire::encode(state), true);
+    Inbound in;
+    CHECK(receive(b, in, {&a, &b, &c}) && in.from == 1);
+    auto got = net::wire::decode(in.bytes);
+    CHECK(got.has_value() && got->state.x == -42);
+    CHECK(receive(c, in, {&a, &b, &c}) && in.from == 1);
+    CHECK(!a.poll(in));
 
-    // Unreliable messages on localhost arrive too.
-    c3.send(1, net::wire::encode(hello(3)), false);
-    CHECK(receive(host, in, {&host, &c2, &c3}));
-    CHECK(in.from == 3);
+    // Player 2 sends straight to player 3, unreliably: the sender id is the connection's player.
+    Frame vote;
+    vote.type = Type::Vote;
+    vote.from = 2;
+    vote.wants_host = true;
+    b.send(3, net::wire::encode(vote), false);
+    CHECK(receive(c, in, {&a, &b, &c}) && in.from == 2);
+    auto v = net::wire::decode(in.bytes);
+    CHECK(v.has_value() && v->type == Type::Vote && v->wants_host);
 
-    c2.shutdown();
-    c3.shutdown();
-    host.shutdown();
+    a.shutdown();
+    b.shutdown();
+    c.shutdown();
 }
 
-void test_leave_is_reported() {
-    std::fprintf(stderr, "a client leaving is reported to the host\n");
-    const uint16_t port = static_cast<uint16_t>(47000 + (getpid() % 1000) + 2);
-    EnetLink host, c2;
-    CHECK(host.host(port));
-    CHECK(c2.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c2, {&host, &c2}));
+void test_leave_is_seen_by_the_others() {
+    std::fprintf(stderr, "a player leaving is seen by the others, the rest stay connected\n");
+    const uint16_t p1 = port_for(7), p2 = port_for(8), p3 = port_for(9);
+    EnetLink a, b, c;
+    CHECK(a.open(1, p1) && b.open(2, p2) && c.open(3, p3));
+    CHECK(b.connect_to({1, "127.0.0.1", p1}));
+    pump({&a, &b, &c}, 60);
+    CHECK(c.connect_to({1, "127.0.0.1", p1}));
+    CHECK(c.connect_to({2, "127.0.0.1", p2}));
+    pump({&a, &b, &c}, 100);
+    drain(a);
+    drain(b);
 
-    LinkEvent ev{};
-    while (next_event(host, ev)) {
-    }
+    c.shutdown();
+    pump({&a, &b}, 100);
+    CHECK(contains(drain(a), LinkEventKind::Disconnected, 3));
+    CHECK(contains(drain(b), LinkEventKind::Disconnected, 3));
+    CHECK(!a.joined(3) && !b.joined(3));
+    CHECK(a.joined(2) && b.joined(1)); // the others are untouched
 
-    c2.shutdown();
-    for (int r = 0; r < 200 && host.joined(2); ++r) pump({&host}, 1);
-    CHECK(!host.joined(2));
-    CHECK(next_event(host, ev) && ev.kind == LinkEventKind::Disconnected && ev.player == 2);
-
-    host.shutdown();
+    a.shutdown();
+    b.shutdown();
 }
 
-void test_full_host_refuses_extra_client() {
-    std::fprintf(stderr, "a fifth player is refused: the host holds three clients at most\n");
-    const uint16_t port = static_cast<uint16_t>(47000 + (getpid() % 1000) + 3);
-    EnetLink host, c2, c3, c4, c5;
-    CHECK(host.host(port));
-    CHECK(c2.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c2, {&host, &c2}));
-    CHECK(c3.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c3, {&host, &c2, &c3}));
-    CHECK(c4.connect("127.0.0.1", port));
-    CHECK(wait_for_self(c4, {&host, &c2, &c3, &c4}));
-    CHECK(c4.self() == 4);
-
-    CHECK(c5.connect("127.0.0.1", port));
-    for (int r = 0; r < 200 && c5.self() == 0; ++r) pump({&host, &c2, &c3, &c4, &c5}, 1);
-    CHECK(c5.self() == 0); // no id given: the host turned it away
-
-    c5.shutdown();
-    c4.shutdown();
-    c3.shutdown();
-    c2.shutdown();
-    host.shutdown();
+void test_invalid_connections_refused() {
+    std::fprintf(stderr, "connections to yourself, to a bad id, or twice are refused\n");
+    const uint16_t p1 = port_for(10), p2 = port_for(11);
+    EnetLink a, b;
+    CHECK(a.open(1, p1));
+    CHECK(!a.connect_to({1, "127.0.0.1", p1}));  // yourself
+    CHECK(!a.connect_to({0, "127.0.0.1", p1}));  // no such player
+    CHECK(!a.connect_to({5, "127.0.0.1", p1}));  // no such player
+    CHECK(b.open(2, p2));
+    CHECK(b.connect_to({1, "127.0.0.1", p1}));
+    CHECK(!b.connect_to({1, "127.0.0.1", p1}));  // already connecting to 1
+    a.shutdown();
+    b.shutdown();
 }
 
 } // namespace
 
 int main() {
-    test_join_assigns_ids();
-    test_messages_both_ways();
-    test_leave_is_reported();
-    test_full_host_refuses_extra_client();
+    test_three_player_mesh();
+    test_messages_between_all();
+    test_leave_is_seen_by_the_others();
+    test_invalid_connections_refused();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;
     }
-    std::fprintf(stderr, "all enet transport checks passed\n");
+    std::fprintf(stderr, "all enet mesh checks passed\n");
     return 0;
 }
