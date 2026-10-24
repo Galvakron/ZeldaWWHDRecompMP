@@ -1,57 +1,39 @@
-/* Prototype: three remote Links that walk on their own, to test the Link proxies in the game.
+/* Prototype: three static remote Links, spaced apart from the real Link.
  *
- * Each proxy follows the movement bot (runtime/src/net/bot.cpp): every 15 seconds it walks forward for
- * 3 seconds, walks back to its start, then stands still. Proxy N starts (N)*400 units from the real
- * Link, along x. The bot runs inside the mod for now; the network state replaces it later.
+ * Each proxy stands at (real_Link_x + (N+1)*SPACING, real_Link_y, real_Link_z) where N is proxy index
+ * 0..2. They do not move — this is a spawn-and-place test. Once they appear, we know the profile id
+ * is correct and we can add movement, tints and network input later.
  *
- * NOT VERIFIED IN THE GAME YET. The Link profile id (REMOTE_LINK_PROC) is not in the SDK headers, so
- * the proxies are not created until it is set. The field offsets come from wwhd/actor.h
- * (fopAc_ac_c.current at 0x314, its angle at 0x320, its room at 0x326). */
+ * The profile id 0xA9 (169) comes from the GC Wind Waker decomp (zeldaret/tww), where Link is the 170th
+ * entry in g_fpcPfLst_ProfileList (index 169). The WWHD engine keeps the same profile table. A discovery
+ * hook confirms this at runtime by logging the procName when daPy_Create is called; if 0xA9 is wrong, the
+ * log will show the real value.
+ *
+ * Field offsets come from wwhd/actor.h (fopAc_ac_c.current at 0x314, angle at 0x320, room at 0x326). */
 
 #include "wwhd_guest.h"
 #include "wwhd/functions.h"
 #include "wwhd/bindings.h"
 #include "wwhd/vectors.h"
 
-/* TODO: the profile id of the player actor. Set it from the game's profile table once it is found. */
-#define REMOTE_LINK_PROC 0u
+/* Link's profile id — index 169 in g_fpcPfLst_ProfileList (GC WW decomp). */
+#define REMOTE_LINK_PROC 0xA9u
 
 #define PROXY_COUNT 3
-#define PERIOD_MS 15000u
-#define WALK_MS 3000u
-#define SPEED 300u   /* game units per second */
-#define SPACING 400  /* along x, from the real Link's start */
+#define SPACING 400  /* game units along x between each proxy */
 
-#define OFF_CURRENT_POS 0x314
+#define OFF_CURRENT_POS   0x314
 #define OFF_CURRENT_ANGLE 0x320
-#define OFF_CURRENT_ROOM 0x326
+#define OFF_CURRENT_ROOM  0x326
 
-static u32 proxy_actor[PROXY_COUNT];
-static int spawned;
-static double elapsed_ms;
-static float base_x, base_y, base_z;
-static s8 base_room;
+static u32  proxy_actor[PROXY_COUNT];
+static int  spawned;
+static int  spawn_failed;
 
-/* The bot's offset from its start point at time t (ms), along z, and its anim (0 idle, 1 forward, 2 back). */
-static void bot_offset(unsigned index, unsigned long long t_ms, s32* dx, s32* dz, u16* anim) {
-    unsigned long long phase = t_ms % PERIOD_MS;
-    long long offset = 0;
-    *dx = (s32)((index + 1) * SPACING);
-    if (phase < WALK_MS) {
-        offset = (long long)SPEED * (long long)phase / 1000;
-        *anim = 1;
-    } else if (phase < 2 * WALK_MS) {
-        unsigned long long back = 2 * WALK_MS - phase;
-        offset = (long long)SPEED * (long long)back / 1000;
-        *anim = 2;
-    } else {
-        *anim = 0;
-    }
-    *dz = (s32)offset;
-}
+/* ---- position helpers ---- */
 
 static void write_position(u8* actor, float x, float y, float z, s16 yaw) {
-    cXyz* pos = (cXyz*)(actor + OFF_CURRENT_POS);
+    cXyz*  pos   = (cXyz*)(actor + OFF_CURRENT_POS);
     csXyz* angle = (csXyz*)(actor + OFF_CURRENT_ANGLE);
     pos->x = x;
     pos->y = y;
@@ -61,55 +43,78 @@ static void write_position(u8* actor, float x, float y, float z, s16 yaw) {
     angle->z = 0;
 }
 
+/* ---- spawning ---- */
+
 static void spawn_proxies(u8* link) {
     cXyz* p = (cXyz*)(link + OFF_CURRENT_POS);
-    base_x = p->x;
-    base_y = p->y;
-    base_z = p->z;
-    base_room = *(s8*)(link + OFF_CURRENT_ROOM);
+    float bx = p->x;
+    float by = p->y;
+    float bz = p->z;
+    s8 room  = *(s8*)(link + OFF_CURRENT_ROOM);
     spawned = 1;
 
-    if (REMOTE_LINK_PROC == 0) {
-        wwhd_log("remote-link-proto: profile id not set, no proxies created");
-        return;
-    }
+    wwhd_log("remote-link-proto: spawning 3 static proxies");
+
     for (unsigned i = 0; i < PROXY_COUNT; ++i) {
         cXyz at;
         csXyz angle = {0, 0, 0};
-        at.x = base_x;
-        at.y = base_y;
-        at.z = base_z;
-        u32 id = wwhd_fopAcM_create(REMOTE_LINK_PROC, 0, (u32)(unsigned long)&at, base_room,
-                                    (u32)(unsigned long)&angle, 0, 0, 0);
+        at.x = bx + (float)((int)(i + 1) * SPACING);
+        at.y = by;
+        at.z = bz;
+        u32 id = wwhd_fopAcM_create(REMOTE_LINK_PROC, 0,
+                                     (u32)(unsigned long)&at, (s32)room,
+                                     (u32)(unsigned long)&angle, 0, 0, 0);
         if (id == 0) {
-            wwhd_log_int("remote-link-proto: create failed for proxy", (int)i);
+            wwhd_log_int("remote-link-proto: create returned 0 for proxy", (int)i);
+            spawn_failed = 1;
             continue;
         }
+        wwhd_log_int("remote-link-proto: created proxy with unique id", (int)id);
+
+        /* Look up the actor pointer from the unique id. */
         u32 actor = 0;
         wwhd_fopAcM_SearchByID(id, (u32)(unsigned long)&actor);
+        if (actor == 0) {
+            wwhd_log_int("remote-link-proto: SearchByID failed for proxy", (int)i);
+            spawn_failed = 1;
+            continue;
+        }
         proxy_actor[i] = actor;
+        wwhd_log_int("remote-link-proto: proxy actor ready", (int)i);
     }
+
+    if (!spawn_failed)
+        wwhd_log("remote-link-proto: all 3 proxies spawned OK");
 }
 
-/* Discovery: the game creates Link through fopAcM_create with daPy_Create as the create function. Logging
- * the procName of that call gives the profile id to put in REMOTE_LINK_PROC. */
+/* ---- discovery hook: confirm the profile id at runtime ---- */
+
 WWHD_HOOK(WWHD_ADDR_fopAcM_create, log_link_profile,
-          (u32 procName, u32 parameter, u32 pPos, s32 roomNo, u32 pAngle, u32 pScale, u32 i_argument, u32 createFunc)) {
-    if (createFunc == WWHD_ADDR_daPy_Create) wwhd_log_hex("remote-link-proto: Link profile id", procName);
+          (u32 procName, u32 parameter, u32 pPos, s32 roomNo,
+           u32 pAngle, u32 pScale, u32 i_argument, u32 createFunc)) {
+    if (createFunc == WWHD_ADDR_daPy_Create)
+        wwhd_log_hex("remote-link-proto: Link profile id", procName);
 }
+
+/* ---- per-frame: spawn once, then keep proxies in place ---- */
 
 WWHD_HOOK(WWHD_ADDR_daPy_Execute, remote_link_step, (void* link)) {
-    if (!spawned) spawn_proxies((u8*)link);
+    if (!spawned) {
+        spawn_proxies((u8*)link);
+        return;
+    }
 
-    elapsed_ms += wwhd_logic_dt() * 1000.0;
-    unsigned long long t = (unsigned long long)elapsed_ms;
+    /* Re-read the real Link position every frame and place the proxies relative to it.
+     * This keeps them visible even as the player walks around. */
+    u8* lk = (u8*)link;
+    cXyz* p = (cXyz*)(lk + OFF_CURRENT_POS);
+    float bx = p->x;
+    float by = p->y;
+    float bz = p->z;
 
     for (unsigned i = 0; i < PROXY_COUNT; ++i) {
         u8* actor = (u8*)(unsigned long)proxy_actor[i];
         if (actor == 0) continue;
-        s32 dx, dz;
-        u16 anim;
-        bot_offset(i, t, &dx, &dz, &anim);
-        write_position(actor, base_x + (float)dx, base_y, base_z + (float)dz, 0);
+        write_position(actor, bx + (float)((int)(i + 1) * SPACING), by, bz, 0);
     }
 }
