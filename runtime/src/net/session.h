@@ -55,7 +55,8 @@ public:
     // when there are at least two candidates.
     using Draw = std::function<size_t(size_t count)>;
 
-    explicit HostSession(Draw draw);
+    // `host` is the player the game is running for: the one who left, when a new authority takes over.
+    explicit HostSession(Draw draw, PlayerId host = kFirstPlayer);
 
     // Connection events. Unknown player IDs are ignored.
     void connect(PlayerId p, uint64_t now_ms);

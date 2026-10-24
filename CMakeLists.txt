@@ -443,6 +443,12 @@ if(WWHD_MULTIPLAYER)
     target_include_directories(net_enet_test PRIVATE ${enet_SOURCE_DIR}/include)
     target_link_libraries(net_enet_test PRIVATE enet)
     add_test(NAME net_enet COMMAND net_enet_test)
+    add_executable(net_takeover_test runtime/tools/net_takeover_test.cpp runtime/src/net/enet_link.cpp runtime/src/net/session.cpp runtime/src/net/session_net.cpp runtime/src/net/wire.cpp runtime/src/net/loopback.cpp)
+    target_include_directories(net_takeover_test PRIVATE runtime/src)
+    target_compile_options(net_takeover_test PRIVATE -UNDEBUG)
+    target_include_directories(net_takeover_test PRIVATE ${enet_SOURCE_DIR}/include)
+    target_link_libraries(net_takeover_test PRIVATE enet)
+    add_test(NAME net_takeover COMMAND net_takeover_test)
 endif()
 # World editor MCP interface (runtime/src/editor/mcp.h): HTTP parsing, JSON-RPC, tools, token, Host / Origin,
 # size limit, confirm and path rules, and the loopback listener

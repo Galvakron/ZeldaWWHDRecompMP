@@ -29,6 +29,7 @@ enum class Type : uint8_t {
     Notice = 5,      // a session notice: kind, player, count, candidates
     PlayerState = 6, // a player's position and animation (18 bytes)
     Welcome = 7,     // the host gives a joining client its player id: 1 byte, 2..4
+    Snapshot = 8,    // the session's current view, for a player who joined or came back
 };
 
 // State of a remote Link, sent a few times per second. Units are the game's own.
@@ -45,6 +46,14 @@ struct PlayerState {
     }
 };
 
+// The session view a new or returning player needs to catch up: phase, host, drawn player, candidates.
+struct Snapshot {
+    uint8_t phase = 0;   // net::Phase
+    PlayerId host = kFirstPlayer;
+    PlayerId winner = 0; // 0 when nobody is drawn
+    std::vector<PlayerId> candidates;
+};
+
 struct Frame {
     Type type = Type::Hello;
     PlayerId from = 0;
@@ -52,6 +61,7 @@ struct Frame {
     net::Notice notice;       // Type::Notice
     PlayerState state;        // Type::PlayerState
     PlayerId assigned = 0;    // Type::Welcome
+    Snapshot snapshot;        // Type::Snapshot
 };
 
 std::vector<uint8_t> encode(const Frame& frame);

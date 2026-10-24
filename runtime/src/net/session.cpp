@@ -4,7 +4,7 @@
 
 namespace net {
 
-HostSession::HostSession(Draw draw) : draw_(std::move(draw)) {}
+HostSession::HostSession(Draw draw, PlayerId host) : draw_(std::move(draw)), host_(host) {}
 
 bool HostSession::connected(PlayerId p) const {
     return valid(p) && connected_[p];

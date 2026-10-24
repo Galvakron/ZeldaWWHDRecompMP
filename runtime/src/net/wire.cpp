@@ -75,6 +75,13 @@ std::vector<uint8_t> payload_of(const Frame& f) {
     case Type::Welcome:
         put_u8(out, f.assigned);
         break;
+    case Type::Snapshot:
+        put_u8(out, f.snapshot.phase);
+        put_u8(out, f.snapshot.host);
+        put_u8(out, f.snapshot.winner);
+        put_u8(out, static_cast<uint8_t>(f.snapshot.candidates.size()));
+        for (PlayerId c : f.snapshot.candidates) put_u8(out, c);
+        break;
     }
     return out;
 }
@@ -114,6 +121,26 @@ bool parse_payload(Type type, const uint8_t* p, size_t n, Frame& f) {
         if (n != 1 || !valid_player(p[0]) || p[0] == kFirstPlayer) return false;
         f.assigned = p[0];
         return true;
+    case Type::Snapshot: {
+        if (n < 4) return false;
+        const uint8_t phase = p[0];
+        const uint8_t host = p[1];
+        const uint8_t winner = p[2];
+        const uint8_t count = p[3];
+        if (phase > static_cast<uint8_t>(Phase::AwaitingAck)) return false;
+        if (!valid_player(host)) return false;
+        if (winner != 0 && !valid_player(winner)) return false;
+        if (count > kMaxPlayers || n != 4u + count) return false;
+        f.snapshot.phase = phase;
+        f.snapshot.host = host;
+        f.snapshot.winner = winner;
+        f.snapshot.candidates.clear();
+        for (uint8_t i = 0; i < count; ++i) {
+            if (!valid_player(p[4 + i])) return false;
+            f.snapshot.candidates.push_back(p[4 + i]);
+        }
+        return true;
+    }
     }
     return false;
 }
@@ -136,7 +163,7 @@ std::optional<Frame> decode(const std::vector<uint8_t>& bytes) {
     if (bytes.size() < kHeaderSize) return std::nullopt;
     const uint8_t* d = bytes.data();
     if (d[0] != kVersion) return std::nullopt;
-    if (d[1] < 1 || d[1] > static_cast<uint8_t>(Type::Welcome)) return std::nullopt;
+    if (d[1] < 1 || d[1] > static_cast<uint8_t>(Type::Snapshot)) return std::nullopt;
     if (!valid_player(d[2])) return std::nullopt;
     const size_t length = get_u16(d + 3);
     if (bytes.size() != kHeaderSize + length) return std::nullopt;
