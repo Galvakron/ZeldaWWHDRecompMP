@@ -91,6 +91,13 @@ static void spawn_proxies(u8* link) {
     }
 }
 
+/* Discovery: the game creates Link through fopAcM_create with daPy_Create as the create function. Logging
+ * the procName of that call gives the profile id to put in REMOTE_LINK_PROC. */
+WWHD_HOOK(WWHD_ADDR_fopAcM_create, log_link_profile,
+          (u32 procName, u32 parameter, u32 pPos, s32 roomNo, u32 pAngle, u32 pScale, u32 i_argument, u32 createFunc)) {
+    if (createFunc == WWHD_ADDR_daPy_Create) wwhd_log_hex("remote-link-proto: Link profile id", procName);
+}
+
 WWHD_HOOK(WWHD_ADDR_daPy_Execute, remote_link_step, (void* link)) {
     if (!spawned) spawn_proxies((u8*)link);
 
