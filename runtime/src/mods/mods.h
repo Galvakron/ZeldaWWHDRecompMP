@@ -62,9 +62,14 @@ enum Cheat {
     kCheatSongs = 8, kCheatTriforce = 16, kCheatDungeon = 32, kCheatKey = 64,
 };
 void request_cheat(int which);  // any thread
-enum Infinite { kInfHealth = 1, kInfMagic = 2, kInfAmmo = 4 };
+enum Infinite { kInfHealth = 1, kInfMagic = 2, kInfAmmo = 4, kMoonJump = 8, kMoonNoFall = 16 };
 bool infinite(int which);
 void set_infinite(int which, bool on);
+void moon_jump_input(const input::PadState& pad);
+void moon_jump_camera(uint32_t camera);
+void moon_jump_reset(); // game thread after state restore
+void moon_jump_step(Cpu* cpu, uint32_t link, bool before);
+bool moon_jump_move(uint32_t link, float& x, float& z);
 void cheats_service();          // game main thread, frame start (interp.cpp)
 
 // shared helpers (mods.cpp)

@@ -1171,6 +1171,15 @@ void tab_mods() {
         int bit = inf[i].second;
         if (check(inf[i].first, mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
     }
+    {
+        int bit = mods::kMoonJump;
+        if (check("Moon jump (hold L to fly)", mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
+    }
+    ImGui::SameLine(0, 24);
+    {
+        int bit = mods::kMoonNoFall;
+        if (check("No fall damage after moon jump", mods::infinite(bit), &v)) hostui::post([bit, v] { mods::set_infinite(bit, v); });
+    }
     heading("Story cheats (can break story events; use a spare save file)");
     if (ImGui::Button("All songs")) mods::request_cheat(mods::kCheatSongs);
     ImGui::SameLine();

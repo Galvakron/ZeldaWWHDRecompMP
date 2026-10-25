@@ -1,5 +1,6 @@
 #include "interp.h"
 #include "mods/guest_mods.h"
+#include "mods/mods.h"
 #include "mods/packages.h"
 #include "mods/tp_monsters.h"
 // Frame interpolation (60, 120 or 240 fps output, game logic unchanged at 30 steps per second).
@@ -358,6 +359,7 @@ static void cam_trace(uint32_t cam, const char* what) {
 extern "C" void hook_024FFC40(Cpu* c) {
     using namespace interp;
     uint32_t cam = c->r[3];
+    mods::moon_jump_camera(cam);
     mods::extras::camera_draw(cam);  // the Big ship helm's far camera (mods/extras.cpp)
     struct MonstersDrawn { uint32_t cam; ~MonstersDrawn() { mods::tpm::camera_drawn(cam); } } monsters_drawn{cam};  // as drawn (mods/tp_monsters.cpp)
     Prev* p = prev_for(cam);
@@ -685,6 +687,7 @@ void ss_reset() {
     g_step_n = 1;
     fx_ss_reset();
     true60::ss_reset();
+    mods::moon_jump_reset();
 }
 // Paced interpolation (WWHD_INTERP_PACED=1, the default on Android and at 120/240 fps): an
 // in-between pass is drawn only when it fits before the next logic step is due (33.3 ms after the

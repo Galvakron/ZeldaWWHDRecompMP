@@ -81,6 +81,7 @@ HLE(padscore, KPADReadEx) {
         p.lx = f.lx; p.ly = f.ly; p.rx = f.rx; p.ry = f.ry;
     }
     last_p = p;
+    mods::moon_jump_input(p);
     mods::move_speed_input(p.buttons);
     if (!repeat) motion::right_stick(p.rx, p.ry);  // the Pro Controller's stick decides gyro use too (motion.h)
     uint32_t hold = pro_buttons(p.buttons);
