@@ -355,6 +355,8 @@ extern "C" void hook_028766CC(Cpu* c) {
         if (name_is(pane, "L_EnemyHP_00") || name_is(pane, "L_CommandA_00")) role = panes::Role::Projected;
         else if (is_hud_edge_pane(pane)) role = panes::Role::Hud;
     }
+    // move the rupee counter up (under the button prompts) to sit near the item slots
+    if (parent == t_root && name_is(pane, "L_Rupy_00")) ty -= 300.0f;
     auto transformed = panes::transform(role, tx, ty, sx, sy, kx, ky);
     nx = transformed.x; ny = transformed.y;
     // a leaf covering the whole screen (background, fade): stretch it to the new shape

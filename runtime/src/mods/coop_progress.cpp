@@ -41,6 +41,8 @@ struct Field { uint16_t off, size; Mode mode; };
 std::vector<Field> fields() {
     std::vector<Field> f = {
         {0x000, 2, kMax},      // dSv_player_status_a_c: max life (heart containers and pieces)
+        {0x002, 2, kMax},      //   current life (quarter hearts): the healthier player's count shared
+        {0x004, 2, kMax},      //   rupees: the richer player's count shared (chest loot, pickups)
         {0x00E, 3, kSet},      //   sword, shield, bracelets (mSelectEquip)
         {0x012, 1, kMax},      //   wallet size
         {0x013, 1, kMax},      //   max magic
@@ -218,6 +220,14 @@ void step(Cpu* c, bool live) {
     read(info, now);
     if (g_was.empty() || ld8(info + kDataNum) != g_data_num) {  // the first step in the host's world, or another Quest Log
         g_was = now, g_data_num = ld8(info + kDataNum);
+    }
+    // rupee debug: log every 90 steps (~3s) the save-data rupee value and the meter's pending counter
+    constexpr uint32_t kPlayBase = GD(0x1046F0B0);
+    if (t_steps % 90 == 0) {
+        const uint16_t sv_rupees = (uint16_t)(now[4] << 8 | now[5]);
+        const int32_t  pending   = (int32_t)ld32(kPlayBase + 0x5B48);
+        const uint16_t was_rupees = g_was.size() >= 6 ? (uint16_t)(g_was[4] << 8 | g_was[5]) : 0xFFFF;
+        mods::trace("coop: rupee debug: sv=%u pending=%d was=%u live=%d", sv_rupees, pending, was_rupees, (int)live);
     }
     // this game's changes out
     std::string out, said;

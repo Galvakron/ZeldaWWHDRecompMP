@@ -3,7 +3,7 @@
 // the step before and sends what it changed, field by field; the others put it in theirs. Anchor's way (Ship of
 // Harkinian), by comparison instead of hooks: the story's event bits, each stage's chests, switches, pickups, visited
 // rooms, small keys and dungeon items, the ocean's salvage bits, the items, songs, pearls, Triforce, charts, maps and
-// capacities. Not shared (Windwaker-coop's choice): health, rupees, magic, ammunition, bottle contents, bags.
+// capacities. Shared as maximum: current life and rupees. Not shared: magic, ammunition, bottle contents, bags.
 #pragma once
 #include <cstddef>
 #include <cstdint>
