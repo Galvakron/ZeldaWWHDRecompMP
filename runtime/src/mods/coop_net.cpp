@@ -8,29 +8,23 @@
 #include "coop_net.h"
 
 #ifdef _WIN32
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  include <windows.h>
-// ws2_32 is linked via CMakeLists.txt
-#  define SOCK_VALID(s) ((s) != INVALID_SOCKET)
-#  define SOCK_CLOSE(s) closesocket(s)
-#  define SOCK_ERR      INVALID_SOCKET
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #else
-#  include <arpa/inet.h>
-#  include <fcntl.h>
-#  include <netdb.h>
-#  include <sys/socket.h>
-#  include <unistd.h>
-#  define SOCKET int
-#  define SOCK_VALID(s) ((s) >= 0)
-#  define SOCK_CLOSE(s) close(s)
-#  define SOCK_ERR      (-1)
-#  ifdef __APPLE__
-#    include <mach-o/dyld.h>
-#  endif
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
 #endif
 
 #include <algorithm>
@@ -41,14 +35,25 @@
 #include <deque>
 #include <map>
 
+#include "../build_info.h"
 #include "mods.h"
+
+#ifdef _WIN32
+using socket_t = SOCKET;
+static constexpr socket_t kNoSocket = INVALID_SOCKET;
+static void close_socket(socket_t s) { closesocket(s); }
+#else
+using socket_t = int;
+static constexpr socket_t kNoSocket = -1;
+static void close_socket(socket_t s) { close(s); }
+#endif
 
 namespace mods::coop::net {
 namespace {
 
 constexpr uint32_t kMagic = 0x4F435757;  // "WWCO"
 constexpr uint8_t kControl = 0, kRefuse = 0xFE;
-constexpr uint32_t kTick = 50, kTimeout = 5000, kKeepAlive = 1000;
+constexpr uint32_t kTick = 33, kKeepAlive = 1000;  // (a tick each game step: 30 Hz)
 constexpr size_t kMtu = 1200;
 
 #pragma pack(push, 1)
@@ -72,7 +77,7 @@ struct Link {
 };
 struct Player { bool on = false; std::string name; int tunic = 0; };
 
-SOCKET g_sock = SOCK_ERR;
+socket_t g_sock = kNoSocket;
 Role g_role = Role::kOff;
 int g_me = 0;
 Link g_link[kMaxPlayers];     // host: [i] guest i; guest: [0] the host
@@ -84,7 +89,7 @@ std::string g_my_name;
 int g_my_tunic = 0;
 std::string g_left_why;  // guest: why the host is gone (reported at the next poll)
 
-void raw(const sockaddr_in& to, const std::string& p) { sendto(g_sock, (const char*)p.data(), (int)p.size(), 0, (const sockaddr*)&to, sizeof to); }
+void raw(const sockaddr_in& to, const std::string& p) { sendto(g_sock, p.data(), (int)p.size(), 0, (const sockaddr*)&to, sizeof to); }
 
 std::string head(Link& l, uint8_t kind, uint8_t origin, uint32_t ot) {
     const uint32_t now = now_ms();
@@ -192,7 +197,7 @@ void take(int li, const uint8_t* d, size_t n, Handler& h) {
         } else if (type == kLeft && len >= 1) {
             drop(b[0] % kMaxPlayers, "left", h);
         } else {
-            if (g_role == Role::kHost && (type == kFired || type == kEffect || type == kBoatShot || type == kProgress))  // passed on to the other guests
+            if (g_role == Role::kHost && (type == kFired || type == kEffect || type == kBoatShot || type == kProgress || type == kSound || type == kPlayerHit || type == kBombed || type == kMonHit || type == kMonGone || type == kDoorMove || type == kRupees))  // passed on to the other guests
                 for (int i = 1; i < kMaxPlayers; i++) if (i != li && g_link[i].on) queue(g_link[i], type, origin, std::string((const char*)b, len));
             h.message(origin, type, b, len);
         }
@@ -217,17 +222,24 @@ uint32_t build_hash() {
     if (h) return h;
     if (const char* e = getenv("WWHD_COOP_BUILD")) return h = (uint32_t)strtoul(e, nullptr, 16);  // (test aid: another build)
     char path[4096];
-    h = 2166136261u;
-#ifdef _WIN32
-    DWORD got = GetModuleFileNameA(nullptr, path, sizeof path);
-    FILE* f = got > 0 && got < sizeof path ? fopen(path, "rb") : nullptr;
-#elif defined(__APPLE__)
     uint32_t size = sizeof path;
-    FILE* f = _NSGetExecutablePath(path, &size) == 0 ? fopen(path, "rb") : nullptr;
+    h = 2166136261u;
+    // A clean build is known by its commit, so friends' own builds and other systems' match; a build with local changes by its bytes
+    const std::string commit = build::commit();
+    if (commit != "unknown" && commit.find("-dirty") == std::string::npos) {
+        for (const char c : commit) h = (h ^ (uint8_t)c) * 16777619u;
+        return h;
+    }
+#ifdef __APPLE__
+    const bool have = _NSGetExecutablePath(path, &size) == 0;
+#elif defined(_WIN32)
+    const bool have = GetModuleFileNameA(nullptr, path, size) > 0;
 #else
-    FILE* f = fopen("/proc/self/exe", "rb");
+    const ssize_t got = readlink("/proc/self/exe", path, size - 1);
+    const bool have = got > 0;
+    if (have) path[got] = 0;
 #endif
-    if (f) {
+    if (FILE* f = have ? fopen(path, "rb") : nullptr) {
         static uint8_t buf[1 << 20];
         for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;)
             for (size_t i = 0; i < n; i++) h = (h ^ buf[i]) * 16777619u;
@@ -248,12 +260,18 @@ bool start(Role r, const std::string& addr, int port, const std::string& my_name
     stop(nullptr);
     if (r == Role::kOff) return true;
 #ifdef _WIN32
-    { WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); }
+    static const bool wsa = [] { WSADATA d; return WSAStartup(MAKEWORD(2, 2), &d) == 0; }();
+    if (!wsa) { why = "no sockets"; return false; }
 #endif
     g_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (!SOCK_VALID(g_sock)) { why = "no socket"; return false; }
+    if (g_sock == kNoSocket) { why = "no socket"; return false; }
 #ifdef _WIN32
-    { u_long nb = 1; ioctlsocket(g_sock, FIONBIO, &nb); }
+    u_long nonblocking = 1;
+    ioctlsocket(g_sock, FIONBIO, &nonblocking);
+    // (SIO_UDP_CONNRESET off: else a packet to a guest that has gone makes the next recvfrom fail, and that stops poll's loop)
+    BOOL report = FALSE;
+    DWORD unused = 0;
+    WSAIoctl(g_sock, 0x9800000C, &report, sizeof report, nullptr, 0, &unused, nullptr, nullptr);
 #else
     fcntl(g_sock, F_SETFL, O_NONBLOCK);
 #endif
@@ -261,7 +279,7 @@ bool start(Role r, const std::string& addr, int port, const std::string& my_name
     me.sin_family = AF_INET, me.sin_addr.s_addr = htonl(INADDR_ANY), me.sin_port = htons(r == Role::kHost ? port : 0);
     if (bind(g_sock, (sockaddr*)&me, sizeof me) < 0) {
         why = "port " + std::to_string(port) + " is in use";
-        SOCK_CLOSE(g_sock), g_sock = SOCK_ERR;
+        close_socket(g_sock), g_sock = kNoSocket;
         return false;
     }
     g_role = r, g_me = 0, g_my_name = my_name, g_my_tunic = my_tunic % 4, g_next_tick = now_ms(), g_left_why.clear();
@@ -293,16 +311,13 @@ bool start(Role r, const std::string& addr, int port, const std::string& my_name
 }
 
 void stop(const char* why) {
-    if (SOCK_VALID(g_sock)) {
+    if (g_sock != kNoSocket) {
         for (Link& l : g_link)
             if (l.on) for (int k = 0; k < 3; k++) raw(l.addr, head(l, kControl, (uint8_t)g_me, 0) + std::string("\0\0\0\0", 4) + (char)kBye);
-        SOCK_CLOSE(g_sock);
+        close_socket(g_sock);
         mods::trace("coop: stopped%s%s", why ? ": " : "", why ? why : "");
-#ifdef _WIN32
-        WSACleanup();
-#endif
     }
-    g_sock = SOCK_ERR, g_role = Role::kOff, g_status = why ? why : "Off";
+    g_sock = kNoSocket, g_role = Role::kOff, g_status = why ? why : "Off";
     for (Link& l : g_link) l = Link{};
     for (Player& p : g_player) p = Player{};
     g_states.clear();
@@ -314,14 +329,19 @@ void send(int to, Msg type, const std::string& body) {
 }
 
 void put_state(uint8_t kind, const std::string& body) { g_states[kind] = {now_ms(), body}; }
+void add_state(uint8_t kind, const std::string& more) {
+    auto& s = g_states[kind];
+    if (s.second.empty()) s.first = now_ms();
+    if (s.second.size() + more.size() <= 1000) s.second += more;  // (a late tick: the newest dropped, under the packet size)
+}
 
 void poll(Handler& h) {
-    if (!SOCK_VALID(g_sock)) return;
+    if (g_sock == kNoSocket) return;
     const uint32_t now = now_ms();
     uint8_t buf[8192];
     sockaddr_in from{};
     socklen_t fl = sizeof from;
-    for (int n; (n = recvfrom(g_sock, (char*)buf, sizeof buf, 0, (sockaddr*)&from, &fl)) >= (int)sizeof(Head); fl = sizeof from) {
+    for (int n; (n = (int)recvfrom(g_sock, (char*)buf, sizeof buf, 0, (sockaddr*)&from, &fl)) >= (int)sizeof(Head); fl = sizeof from) {
         Head hd;
         memcpy(&hd, buf, sizeof hd);
         const uint8_t* d = buf + sizeof hd;
@@ -354,7 +374,8 @@ void poll(Handler& h) {
             h.state(origin, hd.kind, hd.ot, d, dn);
         }
     }
-    // gone: 5 s of nothing, or (guest) the host said so
+    // gone: 5 s of nothing (test aid: WWHD_COOP_TIMEOUT, in ms), or (guest) the host said so
+    static const uint32_t kTimeout = getenv("WWHD_COOP_TIMEOUT") ? (uint32_t)strtoul(getenv("WWHD_COOP_TIMEOUT"), nullptr, 10) : 5000;
     for (int i = 0; i < kMaxPlayers; i++)
         if (g_link[i].on && now - g_link[i].heard > kTimeout) {
             if (g_role == Role::kGuest) g_left_why = g_me ? "Connection lost" : "No answer from the host";
